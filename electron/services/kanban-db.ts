@@ -196,34 +196,43 @@ function importLegacyJsonOnce(d: Database.Database): void {
     .get() as { value: string } | undefined;
   if (already) return;
 
-  const markImported = () =>
-    d.prepare("INSERT OR REPLACE INTO kanban_meta (key, value) VALUES ('json_imported', '1')").run();
+  const markImportedStmt = d.prepare(
+    "INSERT OR REPLACE INTO kanban_meta (key, value) VALUES ('json_imported', '1')"
+  );
 
   // No legacy file → nothing to import, ever. Mark done so we don't keep checking.
   if (!fs.existsSync(KANBAN_FILE)) {
-    markImported();
+    markImportedStmt.run();
     return;
   }
 
   try {
     const raw = fs.readFileSync(KANBAN_FILE, 'utf-8');
-    const tasks = JSON.parse(raw) as KanbanTask[];
-    if (Array.isArray(tasks) && tasks.length > 0) {
-      const insert = d.prepare(INSERT_SQL);
-      const run = d.transaction((items: KanbanTask[]) => {
-        for (const t of items) insert.run(taskToRow(t));
-      });
-      run(tasks);
+    const parsed = JSON.parse(raw) as unknown;
+    const tasks = Array.isArray(parsed) ? (parsed as KanbanTask[]) : [];
+    const insert = d.prepare(INSERT_SQL);
+
+    // Import the tasks AND set the json_imported flag in ONE atomic transaction, so the
+    // board data and the "already imported" marker commit together. If any insert throws,
+    // the whole transaction rolls back — no rows AND no flag — so the next launch retries
+    // cleanly. This closes the window where the rows committed but the flag (written as a
+    // separate statement) did not, which would re-import them on the next launch (the
+    // duplication Cursor Bugbot flagged on PR #1).
+    const importTxn = d.transaction((items: KanbanTask[]) => {
+      for (const t of items) insert.run(taskToRow(t));
+      markImportedStmt.run();
+    });
+    importTxn(tasks);
+
+    if (tasks.length > 0) {
       console.log(
         `[kanban-db] Imported ${tasks.length} task(s) from legacy ${KANBAN_FILE} (kept as backup).`
       );
     }
-    // Import succeeded (even an empty/0-length array) → mark done.
-    markImported();
   } catch (err) {
-    // Import FAILED (corrupt JSON, bad row, insert error). Do NOT set the flag — leave it
-    // unmarked so the next launch retries instead of silently dropping the legacy board.
-    // The transaction above is atomic, so a partial insert rolls back and the retry is clean.
+    // Import FAILED (corrupt JSON, malformed row, insert error). The transaction rolled
+    // back, so nothing committed and the flag stays unset — the next launch retries instead
+    // of silently dropping the legacy board (whose JSON is always kept as a backup).
     console.error('[kanban-db] Legacy JSON import failed; will retry next launch (board empty for now):', err);
   }
 }
