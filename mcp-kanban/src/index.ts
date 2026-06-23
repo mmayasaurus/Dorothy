@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 /**
  * MCP server for Kanban task management
- * Available to all Claude agents for creating, updating, and completing tasks
+ * Available to all Claude agents for creating, updating, and completing tasks.
+ *
+ * Thin HTTP client: every read and mutation goes through the Dorothy Agent API
+ * (127.0.0.1:31415 -> electron/services/api-routes/kanban-routes.ts), which is the
+ * SINGLE writer to the SQLite-backed board. This server no longer reads or writes
+ * ~/.dorothy/kanban-tasks.json directly — that dual-writer race with the Electron
+ * main process is gone. (Wave 0 #5b.)
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -10,11 +16,11 @@ import { z } from "zod";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { randomUUID } from "crypto";
+import { apiRequest } from "./utils/api.js";
 
-// Data file path
+// agents.json is read READ-ONLY here, only to resolve agent ids to display names.
+// The board itself is never touched on disk by this process (see utils/api.ts).
 const DATA_DIR = path.join(os.homedir(), ".dorothy");
-const KANBAN_FILE = path.join(DATA_DIR, "kanban-tasks.json");
 const AGENTS_FILE = path.join(DATA_DIR, "agents.json");
 
 // ⚠️ MIRROR of ../../src/types/kanban.ts (canonical source of truth). Keep in sync —
@@ -72,31 +78,6 @@ interface KanbanTask {
   mentions?: string[];
 }
 
-// Helper functions
-function ensureDir(): void {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-}
-
-function loadTasks(): KanbanTask[] {
-  ensureDir();
-  if (!fs.existsSync(KANBAN_FILE)) {
-    return [];
-  }
-  try {
-    const data = fs.readFileSync(KANBAN_FILE, "utf-8");
-    return JSON.parse(data);
-  } catch {
-    return [];
-  }
-}
-
-function saveTasks(tasks: KanbanTask[]): void {
-  ensureDir();
-  fs.writeFileSync(KANBAN_FILE, JSON.stringify(tasks, null, 2));
-}
-
 /** Resolve agent ID to human-readable name from agents.json */
 function getAgentName(agentId: string | null): string | null {
   if (!agentId) return null;
@@ -135,7 +116,8 @@ server.tool(
   },
   async ({ column, assigned_to_me }) => {
     try {
-      let tasks = loadTasks();
+      const { tasks: allTasks } = (await apiRequest("GET", "/api/kanban/tasks")) as { tasks: KanbanTask[] };
+      let tasks = allTasks;
 
       if (column) {
         tasks = tasks.filter(t => t.column === column);
@@ -181,18 +163,7 @@ server.tool(
   },
   async ({ task_id }) => {
     try {
-      const tasks = loadTasks();
-      const task = tasks.find(t => t.id.startsWith(task_id));
-
-      if (!task) {
-        return {
-          content: [{
-            type: "text",
-            text: `Task not found with ID starting with: ${task_id}`,
-          }],
-          isError: true,
-        };
-      }
+      const { task } = (await apiRequest("GET", `/api/kanban/tasks/${encodeURIComponent(task_id)}`)) as { task: KanbanTask };
 
       return {
         content: [{
@@ -235,48 +206,25 @@ server.tool(
   },
   async ({ title, description, project_path, priority, labels }) => {
     try {
-      const tasks = loadTasks();
-
-      // Get project path from env or parameter
+      // Project path comes from the agent's working context — the main process can't know it.
       const projectPath = project_path || process.env.CLAUDE_PROJECT_PATH || process.cwd();
-      const projectId = projectPath.split("/").pop() || "unknown";
 
-      // Calculate order (add to end of backlog)
-      const backlogTasks = tasks.filter(t => t.column === "backlog");
-      const maxOrder = backlogTasks.length > 0
-        ? Math.max(...backlogTasks.map(t => t.order))
-        : -1;
-
-      const newTask: KanbanTask = {
-        id: randomUUID(),
+      const { task } = (await apiRequest("POST", "/api/kanban/tasks", {
         title,
         description,
-        column: "backlog",
-        projectId,
-        projectPath,
-        assignedAgentId: null,
-        agentCreatedForTask: false,
-        requiredSkills: [],
-        priority: priority || "medium",
-        progress: 0,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        order: maxOrder + 1,
-        labels: labels || [],
-        attachments: [],
-      };
-
-      tasks.push(newTask);
-      saveTasks(tasks);
+        project_path: projectPath,
+        priority,
+        labels,
+      })) as { task: KanbanTask };
 
       return {
         content: [{
           type: "text",
           text: `Task created successfully!
-ID: ${newTask.id}
-Title: ${newTask.title}
+ID: ${task.id}
+Title: ${task.title}
 Column: backlog
-Priority: ${newTask.priority}`,
+Priority: ${task.priority}`,
         }],
       };
     } catch (error) {
@@ -301,22 +249,7 @@ server.tool(
   },
   async ({ task_id, progress }) => {
     try {
-      const tasks = loadTasks();
-      const task = tasks.find(t => t.id.startsWith(task_id));
-
-      if (!task) {
-        return {
-          content: [{
-            type: "text",
-            text: `Task not found with ID: ${task_id}`,
-          }],
-          isError: true,
-        };
-      }
-
-      task.progress = progress;
-      task.updatedAt = new Date().toISOString();
-      saveTasks(tasks);
+      const { task } = (await apiRequest("PUT", `/api/kanban/tasks/${encodeURIComponent(task_id)}/progress`, { progress })) as { task: KanbanTask };
 
       return {
         content: [{
@@ -346,33 +279,7 @@ server.tool(
   },
   async ({ task_id, summary }) => {
     try {
-      const tasks = loadTasks();
-      const task = tasks.find(t => t.id.startsWith(task_id));
-
-      if (!task) {
-        return {
-          content: [{
-            type: "text",
-            text: `Task not found with ID: ${task_id}`,
-          }],
-          isError: true,
-        };
-      }
-
-      // Move to done column
-      task.column = "done";
-      task.progress = 100;
-      task.completionSummary = summary;
-      task.updatedAt = new Date().toISOString();
-
-      // Reorder done column
-      const doneTasks = tasks.filter(t => t.column === "done" && t.id !== task.id);
-      task.order = 0;
-      doneTasks.forEach((t, i) => {
-        t.order = i + 1;
-      });
-
-      saveTasks(tasks);
+      const { task } = (await apiRequest("PUT", `/api/kanban/tasks/${encodeURIComponent(task_id)}/done`, { summary })) as { task: KanbanTask };
 
       return {
         content: [{
@@ -403,40 +310,12 @@ server.tool(
   },
   async ({ task_id, column }) => {
     try {
-      const tasks = loadTasks();
-      const task = tasks.find(t => t.id.startsWith(task_id));
-
-      if (!task) {
-        return {
-          content: [{
-            type: "text",
-            text: `Task not found with ID: ${task_id}`,
-          }],
-          isError: true,
-        };
-      }
-
-      const oldColumn = task.column;
-      task.column = column;
-      task.updatedAt = new Date().toISOString();
-
-      // Update progress based on column
-      if (column === "done") {
-        task.progress = 100;
-      } else if (column === "ongoing" && task.progress === 0) {
-        task.progress = 10;
-      }
-
-      // Reorder target column
-      const columnTasks = tasks.filter(t => t.column === column && t.id !== task.id);
-      task.order = columnTasks.length;
-
-      saveTasks(tasks);
+      const { task, previousColumn } = (await apiRequest("PUT", `/api/kanban/tasks/${encodeURIComponent(task_id)}/move`, { column })) as { task: KanbanTask; previousColumn: KanbanColumn };
 
       return {
         content: [{
           type: "text",
-          text: `Task "${task.title}" moved from ${oldColumn} to ${column}`,
+          text: `Task "${task.title}" moved from ${previousColumn} to ${task.column}`,
         }],
       };
     } catch (error) {
@@ -460,26 +339,12 @@ server.tool(
   },
   async ({ task_id }) => {
     try {
-      const tasks = loadTasks();
-      const index = tasks.findIndex(t => t.id.startsWith(task_id));
-
-      if (index === -1) {
-        return {
-          content: [{
-            type: "text",
-            text: `Task not found with ID: ${task_id}`,
-          }],
-          isError: true,
-        };
-      }
-
-      const [deleted] = tasks.splice(index, 1);
-      saveTasks(tasks);
+      const { task } = (await apiRequest("DELETE", `/api/kanban/tasks/${encodeURIComponent(task_id)}`)) as { task: KanbanTask };
 
       return {
         content: [{
           type: "text",
-          text: `Task "${deleted.title}" deleted successfully.`,
+          text: `Task "${task.title}" deleted successfully.`,
         }],
       };
     } catch (error) {
@@ -504,23 +369,8 @@ server.tool(
   },
   async ({ task_id, agent_id }) => {
     try {
-      const tasks = loadTasks();
-      const task = tasks.find(t => t.id.startsWith(task_id));
-
-      if (!task) {
-        return {
-          content: [{
-            type: "text",
-            text: `Task not found with ID: ${task_id}`,
-          }],
-          isError: true,
-        };
-      }
-
       const assignedId = agent_id || process.env.CLAUDE_AGENT_ID || null;
-      task.assignedAgentId = assignedId;
-      task.updatedAt = new Date().toISOString();
-      saveTasks(tasks);
+      const { task } = (await apiRequest("PUT", `/api/kanban/tasks/${encodeURIComponent(task_id)}/assign`, { agent_id: assignedId })) as { task: KanbanTask };
 
       return {
         content: [{

@@ -1,12 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
 let handlers: Map<string, (...args: unknown[]) => Promise<unknown>>;
-let tmpDir: string;
+
+// In-memory stand-in for the SQLite-backed kanban-db. The handlers persist through
+// getAllTasks/replaceAllTasks; mocking them keeps this a pure logic test — no native
+// better-sqlite3 binary, no file I/O. JSON round-trips mimic the real store handing
+// back fresh task objects on every read.
+const dbStore = vi.hoisted(() => ({ tasks: [] as unknown[] }));
+
+vi.mock('../../../electron/services/kanban-db', () => ({
+  getAllTasks: vi.fn(() => JSON.parse(JSON.stringify(dbStore.tasks))),
+  replaceAllTasks: vi.fn((tasks: unknown[]) => { dbStore.tasks = JSON.parse(JSON.stringify(tasks)); }),
+}));
 
 vi.mock('electron', () => ({
   ipcMain: {
@@ -32,11 +39,6 @@ vi.mock('../../../electron/utils/kanban-generate', () => ({
   })),
 }));
 
-vi.mock('os', async (importOriginal) => {
-  const mod = await importOriginal<typeof import('os')>();
-  return { ...mod, homedir: () => tmpDir };
-});
-
 function invokeHandler(channel: string, ...args: unknown[]): Promise<unknown> {
   const fn = handlers.get(channel);
   if (!fn) throw new Error(`No handler for "${channel}"`);
@@ -50,11 +52,7 @@ let mockDeps: Record<string, unknown>;
 beforeEach(() => {
   vi.resetModules();
   handlers = new Map();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kanban-test-'));
-
-  // Ensure data dir
-  const dataDir = path.join(tmpDir, '.dorothy');
-  fs.mkdirSync(dataDir, { recursive: true });
+  dbStore.tasks = [];
 
   mockDeps = {
     getMainWindow: vi.fn(() => ({ webContents: { send: vi.fn() } })),
@@ -69,15 +67,14 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 function writeKanbanFile(tasks: unknown[]): void {
-  fs.writeFileSync(path.join(tmpDir, '.dorothy', 'kanban-tasks.json'), JSON.stringify(tasks, null, 2));
+  dbStore.tasks = JSON.parse(JSON.stringify(tasks));
 }
 
 function readKanbanFile(): unknown[] {
-  return JSON.parse(fs.readFileSync(path.join(tmpDir, '.dorothy', 'kanban-tasks.json'), 'utf-8'));
+  return JSON.parse(JSON.stringify(dbStore.tasks));
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
