@@ -318,7 +318,9 @@ async function createKanbanTaskFromJiraItem(
       title: `[${jiraKey}] ${item.title}`,
       description: `**JIRA Issue:** ${item.url}\n**Project Key:** ${jiraKey.split("-")[0]}\n**Type:** ${item.type}\n**Status:** ${item.raw.status}\n**Priority:** ${item.raw.priority || "Unset"}\n**Reporter:** ${item.author}\n**Assignee:** ${item.raw.assignee || "Unassigned"}\n\n${item.body || "No description"}`,
       project_path: projectPath,
-      project_id: jiraKey,
+      // project_id is intentionally omitted: the route derives it from project_path's
+      // basename, so an automation's JIRA tasks group under one project instead of each
+      // issue key (e.g. PROJ-123) becoming its own project (PR #1, CodeRabbit).
       priority,
       labels: [`jira:${jiraKey}`, "jira", item.type],
     });
