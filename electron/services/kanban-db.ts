@@ -209,24 +209,39 @@ function importLegacyJsonOnce(d: Database.Database): void {
   try {
     const raw = fs.readFileSync(KANBAN_FILE, 'utf-8');
     const parsed = JSON.parse(raw) as unknown;
-    const tasks = Array.isArray(parsed) ? (parsed as KanbanTask[]) : [];
-    const insert = d.prepare(INSERT_SQL);
+    const legacy = Array.isArray(parsed) ? (parsed as KanbanTask[]) : [];
 
-    // Import the tasks AND set the json_imported flag in ONE atomic transaction, so the
-    // board data and the "already imported" marker commit together. If any insert throws,
-    // the whole transaction rolls back — no rows AND no flag — so the next launch retries
-    // cleanly. This closes the window where the rows committed but the flag (written as a
-    // separate statement) did not, which would re-import them on the next launch (the
-    // duplication Cursor Bugbot flagged on PR #1).
-    const importTxn = d.transaction((items: KanbanTask[]) => {
-      for (const t of items) insert.run(taskToRow(t));
+    // Convert each task to a row OUTSIDE the transaction, skipping any malformed one, so a
+    // single bad task object (taskToRow throws) can't abort the whole import. Skipped tasks
+    // stay in the JSON backup, which is never deleted.
+    const rows: ReturnType<typeof taskToRow>[] = [];
+    let skipped = 0;
+    for (const t of legacy) {
+      try {
+        rows.push(taskToRow(t));
+      } catch (rowErr) {
+        skipped++;
+        console.error('[kanban-db] Skipping a malformed legacy task during import:', rowErr);
+      }
+    }
+
+    // Insert the rows AND set the json_imported flag in ONE atomic transaction, so the board
+    // data and the "already imported" marker commit together — there is no window where the
+    // rows committed but the flag (a separate statement) did not, which would re-import and
+    // duplicate them next launch (Cursor Bugbot, PR #1). INSERT OR IGNORE skips any row that
+    // still violates a constraint (e.g. a duplicate id) instead of throwing and rolling the
+    // whole import back, so one bad row can't block the legacy import forever and leave the
+    // board permanently empty (CodeRabbit, PR #1).
+    const insert = d.prepare(INSERT_SQL.replace('INSERT INTO', 'INSERT OR IGNORE INTO'));
+    const importTxn = d.transaction((importRows: typeof rows) => {
+      for (const r of importRows) insert.run(r);
       markImportedStmt.run();
     });
-    importTxn(tasks);
+    importTxn(rows);
 
-    if (tasks.length > 0) {
+    if (legacy.length > 0) {
       console.log(
-        `[kanban-db] Imported ${tasks.length} task(s) from legacy ${KANBAN_FILE} (kept as backup).`
+        `[kanban-db] Imported ${rows.length} legacy task(s)${skipped ? `, skipped ${skipped} malformed` : ''} from ${KANBAN_FILE} (kept as backup).`
       );
     }
   } catch (err) {
