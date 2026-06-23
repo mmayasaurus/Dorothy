@@ -17,8 +17,34 @@ const DATA_DIR = path.join(os.homedir(), ".dorothy");
 const KANBAN_FILE = path.join(DATA_DIR, "kanban-tasks.json");
 const AGENTS_FILE = path.join(DATA_DIR, "agents.json");
 
-// Types
+// ⚠️ MIRROR of ../../src/types/kanban.ts (canonical source of truth). Keep in sync —
+//    __tests__/types/kanban-type-drift.test.ts fails loudly if these diverge.
+//    mcp-kanban is a separately-bundled package and can't import from src/, hence the copy.
 type KanbanColumn = "backlog" | "planned" | "ongoing" | "done";
+
+interface TaskAttachment {
+  path: string;
+  name: string;
+  type: "image" | "pdf" | "document" | "other";
+  size?: number;
+}
+
+interface TaskComment {
+  id: string;
+  author: string;
+  authorType: "user" | "agent";
+  body: string;
+  createdAt: string;
+  mentions?: string[];
+}
+
+interface GithubPrLink {
+  url: string;
+  number?: number;
+  repo?: string;
+  title?: string;
+  state?: "open" | "draft" | "merged" | "closed";
+}
 
 interface KanbanTask {
   id: string;
@@ -28,14 +54,22 @@ interface KanbanTask {
   projectId: string;
   projectPath: string;
   assignedAgentId: string | null;
+  agentCreatedForTask: boolean;
   requiredSkills: string[];
   priority: "low" | "medium" | "high";
   progress: number;
   createdAt: string;
   updatedAt: string;
+  completedAt?: string;
   order: number;
   labels: string[];
   completionSummary?: string;
+  attachments: TaskAttachment[];
+  dueDate?: string;
+  startDate?: string;
+  comments?: TaskComment[];
+  githubPr?: GithubPrLink | null;
+  mentions?: string[];
 }
 
 // Helper functions
@@ -221,6 +255,7 @@ server.tool(
         projectId,
         projectPath,
         assignedAgentId: null,
+        agentCreatedForTask: false,
         requiredSkills: [],
         priority: priority || "medium",
         progress: 0,
@@ -228,6 +263,7 @@ server.tool(
         updatedAt: new Date().toISOString(),
         order: maxOrder + 1,
         labels: labels || [],
+        attachments: [],
       };
 
       tasks.push(newTask);

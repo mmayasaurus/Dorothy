@@ -9,7 +9,9 @@ import { generateTaskFromPrompt } from '../utils/kanban-generate';
 // Kanban Board IPC handlers
 // ============================================
 
-// Types matching frontend
+// ⚠️ MIRROR of src/types/kanban.ts (canonical source of truth). Keep in sync —
+//    __tests__/types/kanban-type-drift.test.ts fails loudly if these diverge.
+//    electron/ cannot import from src/ (separate tsconfig rootDir), hence the copy.
 type KanbanColumn = 'backlog' | 'planned' | 'ongoing' | 'done';
 
 interface TaskAttachment {
@@ -17,6 +19,23 @@ interface TaskAttachment {
   name: string;
   type: 'image' | 'pdf' | 'document' | 'other';
   size?: number;
+}
+
+interface TaskComment {
+  id: string;
+  author: string;
+  authorType: 'user' | 'agent';
+  body: string;
+  createdAt: string;
+  mentions?: string[];
+}
+
+interface GithubPrLink {
+  url: string;
+  number?: number;
+  repo?: string;
+  title?: string;
+  state?: 'open' | 'draft' | 'merged' | 'closed';
 }
 
 interface KanbanTask {
@@ -38,6 +57,11 @@ interface KanbanTask {
   labels: string[];
   completionSummary?: string;
   attachments: TaskAttachment[];
+  dueDate?: string;
+  startDate?: string;
+  comments?: TaskComment[];
+  githubPr?: GithubPrLink | null;
+  mentions?: string[];
 }
 
 interface KanbanTaskCreate {
@@ -49,6 +73,8 @@ interface KanbanTaskCreate {
   priority?: 'low' | 'medium' | 'high';
   labels?: string[];
   attachments?: TaskAttachment[];
+  dueDate?: string;
+  startDate?: string;
 }
 
 interface KanbanTaskUpdate {
@@ -61,6 +87,10 @@ interface KanbanTaskUpdate {
   progress?: number;
   assignedAgentId?: string | null;
   completionSummary?: string;
+  dueDate?: string;
+  startDate?: string;
+  githubPr?: GithubPrLink | null;
+  mentions?: string[];
 }
 
 // Dependencies interface

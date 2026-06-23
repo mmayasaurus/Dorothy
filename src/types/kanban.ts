@@ -13,6 +13,23 @@ export interface TaskAttachment {
   size?: number;                 // File size in bytes
 }
 
+export interface TaskComment {
+  id: string;
+  author: string;                // agent id or user id
+  authorType: 'user' | 'agent';
+  body: string;
+  createdAt: string;             // ISO timestamp
+  mentions?: string[];           // agent/user ids @-mentioned in this comment
+}
+
+export interface GithubPrLink {
+  url: string;
+  number?: number;
+  repo?: string;                 // owner/name
+  title?: string;
+  state?: 'open' | 'draft' | 'merged' | 'closed';
+}
+
 export interface KanbanTask {
   id: string;
   title: string;
@@ -32,6 +49,13 @@ export interface KanbanTask {
   labels: string[];
   completionSummary?: string;    // Summary of what was done by the agent
   attachments: TaskAttachment[]; // Files attached to the task
+  // --- Forward-looking fields (added in Wave 0 so the shared shape is stable and
+  //     Wave 1 feature lanes don't all edit this core type in parallel). All optional. ---
+  dueDate?: string;              // ISO date — deadline
+  startDate?: string;            // ISO date — optional start, for timeline/Gantt views
+  comments?: TaskComment[];      // task discussion + @mentions
+  githubPr?: GithubPrLink | null; // linked GitHub PR
+  mentions?: string[];           // agent/user ids @-mentioned on the task itself
 }
 
 export interface KanbanTaskCreate {
@@ -43,6 +67,8 @@ export interface KanbanTaskCreate {
   priority?: 'low' | 'medium' | 'high';
   labels?: string[];
   attachments?: TaskAttachment[];
+  dueDate?: string;
+  startDate?: string;
 }
 
 export interface KanbanTaskUpdate {
@@ -55,6 +81,10 @@ export interface KanbanTaskUpdate {
   progress?: number;
   assignedAgentId?: string | null;
   completionSummary?: string;
+  dueDate?: string;
+  startDate?: string;
+  githubPr?: GithubPrLink | null;
+  mentions?: string[];
 }
 
 export interface KanbanMoveResult {
