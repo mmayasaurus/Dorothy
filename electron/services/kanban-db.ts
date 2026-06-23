@@ -196,26 +196,36 @@ function importLegacyJsonOnce(d: Database.Database): void {
     .get() as { value: string } | undefined;
   if (already) return;
 
-  try {
-    if (fs.existsSync(KANBAN_FILE)) {
-      const raw = fs.readFileSync(KANBAN_FILE, 'utf-8');
-      const tasks = JSON.parse(raw) as KanbanTask[];
-      if (Array.isArray(tasks) && tasks.length > 0) {
-        const insert = d.prepare(INSERT_SQL);
-        const run = d.transaction((items: KanbanTask[]) => {
-          for (const t of items) insert.run(taskToRow(t));
-        });
-        run(tasks);
-        console.log(
-          `[kanban-db] Imported ${tasks.length} task(s) from legacy ${KANBAN_FILE} (kept as backup).`
-        );
-      }
-    }
-  } catch (err) {
-    console.error('[kanban-db] Legacy JSON import failed (starting with an empty board):', err);
+  const markImported = () =>
+    d.prepare("INSERT OR REPLACE INTO kanban_meta (key, value) VALUES ('json_imported', '1')").run();
+
+  // No legacy file → nothing to import, ever. Mark done so we don't keep checking.
+  if (!fs.existsSync(KANBAN_FILE)) {
+    markImported();
+    return;
   }
 
-  d.prepare("INSERT OR REPLACE INTO kanban_meta (key, value) VALUES ('json_imported', '1')").run();
+  try {
+    const raw = fs.readFileSync(KANBAN_FILE, 'utf-8');
+    const tasks = JSON.parse(raw) as KanbanTask[];
+    if (Array.isArray(tasks) && tasks.length > 0) {
+      const insert = d.prepare(INSERT_SQL);
+      const run = d.transaction((items: KanbanTask[]) => {
+        for (const t of items) insert.run(taskToRow(t));
+      });
+      run(tasks);
+      console.log(
+        `[kanban-db] Imported ${tasks.length} task(s) from legacy ${KANBAN_FILE} (kept as backup).`
+      );
+    }
+    // Import succeeded (even an empty/0-length array) → mark done.
+    markImported();
+  } catch (err) {
+    // Import FAILED (corrupt JSON, bad row, insert error). Do NOT set the flag — leave it
+    // unmarked so the next launch retries instead of silently dropping the legacy board.
+    // The transaction above is atomic, so a partial insert rolls back and the retry is clean.
+    console.error('[kanban-db] Legacy JSON import failed; will retry next launch (board empty for now):', err);
+  }
 }
 
 export function closeKanbanDb(): void {

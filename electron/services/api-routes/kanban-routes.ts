@@ -25,7 +25,7 @@ export function registerKanbanRoutes(app: RouteApp, ctx: RouteContext): void {
   });
 
   // POST /api/kanban/complete
-  app.post('/api/kanban/complete', async (req, sendJson) => {
+  app.post('/api/kanban/complete', (req, sendJson) => {
     const { task_id, agent_id, session_id, summary } = req.body as {
       task_id?: string;
       agent_id?: string;
@@ -34,8 +34,6 @@ export function registerKanbanRoutes(app: RouteApp, ctx: RouteContext): void {
     };
 
     try {
-      const { loadTasks, saveTasks } = await import('../../handlers/kanban-handlers');
-
       const tasks = loadTasks();
       let task;
 
@@ -254,10 +252,12 @@ export function registerKanbanRoutes(app: RouteApp, ctx: RouteContext): void {
         sendJson({ error: 'Task not found' }, 404);
         return;
       }
+      const now = new Date().toISOString();
       task.column = 'done';
       task.progress = 100;
+      task.completedAt = now;
       if (summary) task.completionSummary = summary;
-      task.updatedAt = new Date().toISOString();
+      task.updatedAt = now;
       task.order = 0;
       tasks
         .filter(t => t.column === 'done' && t.id !== task.id)
