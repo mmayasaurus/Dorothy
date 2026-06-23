@@ -4,8 +4,6 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { motion } from 'framer-motion';
 import {
-  Bot,
-  MessageSquare,
   Paperclip,
   Calendar,
   CheckCircle2,
@@ -17,6 +15,7 @@ import {
 } from 'lucide-react';
 import type { KanbanTask, KanbanColumn } from '@/types/kanban';
 import { getLabelColor } from '../constants';
+import { CardAssignee, CardComments, CardDueDate, CardPrBadge } from './card-slots';
 
 interface KanbanCardProps {
   task: KanbanTask;
@@ -203,12 +202,8 @@ export function KanbanCard({ task, onEdit, onDelete, onStart, onOpenTerminal, is
       {/* Footer with meta info */}
       <div className="flex items-center justify-between pt-2 border-t border-border/50">
         <div className="flex items-center gap-3 text-muted-foreground">
-          {/* Agent indicator */}
-          {task.assignedAgentId && (
-            <div className="flex items-center gap-1 text-green-500">
-              <Bot className="w-3.5 h-3.5" />
-            </div>
-          )}
+          {/* Assignee (Wave 1 slot) */}
+          <CardAssignee task={task} />
 
           {/* Skills count */}
           {task.requiredSkills.length > 0 && (
@@ -225,6 +220,11 @@ export function KanbanCard({ task, onEdit, onDelete, onStart, onOpenTerminal, is
               <span>{task.attachments.length}</span>
             </div>
           )}
+
+          {/* Comments / PR / due date (Wave 1 slots) */}
+          <CardComments task={task} />
+          <CardPrBadge task={task} />
+          <CardDueDate task={task} />
         </div>
 
         {/* Done indicator */}
