@@ -1,8 +1,7 @@
 import { ipcMain, BrowserWindow } from 'electron';
-import * as fs from 'fs';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { KANBAN_FILE, DATA_DIR } from '../constants';
+import { getAllTasks, replaceAllTasks } from '../services/kanban-db';
 import { generateTaskFromPrompt } from '../utils/kanban-generate';
 
 // ============================================
@@ -106,28 +105,15 @@ export interface KanbanHandlerDependencies {
 
 let deps: KanbanHandlerDependencies | null = null;
 
-function ensureDir(): void {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-}
-
+// Persistence delegates to the SQLite-backed kanban-db (single source of truth, WAL).
+// loadTasks/saveTasks keep their signatures, so every IPC handler below and the
+// /api/kanban/* routes migrate to SQLite with no further changes. (Wave 0 #5.)
 function loadTasks(): KanbanTask[] {
-  ensureDir();
-  if (!fs.existsSync(KANBAN_FILE)) {
-    return [];
-  }
-  try {
-    const data = fs.readFileSync(KANBAN_FILE, 'utf-8');
-    return JSON.parse(data);
-  } catch {
-    return [];
-  }
+  return getAllTasks();
 }
 
 function saveTasks(tasks: KanbanTask[]): void {
-  ensureDir();
-  fs.writeFileSync(KANBAN_FILE, JSON.stringify(tasks, null, 2));
+  replaceAllTasks(tasks);
 }
 
 function emitTaskEvent(eventName: string, task: KanbanTask): void {
