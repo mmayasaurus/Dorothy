@@ -200,14 +200,27 @@ server.tool(
   {
     title: z.string().describe("Task title"),
     description: z.string().describe("Task description with details"),
-    project_path: z.string().optional().describe("Project path (defaults to current directory)"),
+    project_path: z.string().optional().describe("Absolute path to the agent's project. Falls back to the CLAUDE_PROJECT_PATH env var; required if that is unset."),
     priority: z.enum(["low", "medium", "high"]).optional().describe("Task priority (default: medium)"),
     labels: z.array(z.string()).optional().describe("Labels/tags for the task"),
   },
   async ({ title, description, project_path, priority, labels }) => {
     try {
       // Project path comes from the agent's working context — the main process can't know it.
-      const projectPath = project_path || process.env.CLAUDE_PROJECT_PATH || process.cwd();
+      // Do NOT fall back to process.cwd(): for an MCP server launched over stdio, cwd is wherever
+      // the host launched the server, not the agent's project, so it would silently misattribute
+      // the task (CodeRabbit, PR #1). Use the explicit arg or the per-agent CLAUDE_PROJECT_PATH
+      // env var; if neither is set, ask the caller for it rather than guessing.
+      const projectPath = project_path || process.env.CLAUDE_PROJECT_PATH;
+      if (!projectPath) {
+        return {
+          content: [{
+            type: "text",
+            text: "Cannot create task: no project context. Pass `project_path` — the MCP server's working directory is not the agent's project, so it is not used as a fallback.",
+          }],
+          isError: true,
+        };
+      }
 
       const { task } = (await apiRequest("POST", "/api/kanban/tasks", {
         title,
