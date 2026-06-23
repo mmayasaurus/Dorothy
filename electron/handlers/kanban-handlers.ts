@@ -1,15 +1,16 @@
 import { ipcMain, BrowserWindow } from 'electron';
-import * as fs from 'fs';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { KANBAN_FILE, DATA_DIR } from '../constants';
+import { getAllTasks, replaceAllTasks } from '../services/kanban-db';
 import { generateTaskFromPrompt } from '../utils/kanban-generate';
 
 // ============================================
 // Kanban Board IPC handlers
 // ============================================
 
-// Types matching frontend
+// ⚠️ MIRROR of src/types/kanban.ts (canonical source of truth). Keep in sync —
+//    __tests__/types/kanban-type-drift.test.ts fails loudly if these diverge.
+//    electron/ cannot import from src/ (separate tsconfig rootDir), hence the copy.
 type KanbanColumn = 'backlog' | 'planned' | 'ongoing' | 'done';
 
 interface TaskAttachment {
@@ -17,6 +18,23 @@ interface TaskAttachment {
   name: string;
   type: 'image' | 'pdf' | 'document' | 'other';
   size?: number;
+}
+
+interface TaskComment {
+  id: string;
+  author: string;
+  authorType: 'user' | 'agent';
+  body: string;
+  createdAt: string;
+  mentions?: string[];
+}
+
+interface GithubPrLink {
+  url: string;
+  number?: number;
+  repo?: string;
+  title?: string;
+  state?: 'open' | 'draft' | 'merged' | 'closed';
 }
 
 interface KanbanTask {
@@ -38,6 +56,11 @@ interface KanbanTask {
   labels: string[];
   completionSummary?: string;
   attachments: TaskAttachment[];
+  dueDate?: string;
+  startDate?: string;
+  comments?: TaskComment[];
+  githubPr?: GithubPrLink | null;
+  mentions?: string[];
 }
 
 interface KanbanTaskCreate {
@@ -49,6 +72,8 @@ interface KanbanTaskCreate {
   priority?: 'low' | 'medium' | 'high';
   labels?: string[];
   attachments?: TaskAttachment[];
+  dueDate?: string;
+  startDate?: string;
 }
 
 interface KanbanTaskUpdate {
@@ -61,6 +86,10 @@ interface KanbanTaskUpdate {
   progress?: number;
   assignedAgentId?: string | null;
   completionSummary?: string;
+  dueDate?: string;
+  startDate?: string;
+  githubPr?: GithubPrLink | null;
+  mentions?: string[];
 }
 
 // Dependencies interface
@@ -76,28 +105,15 @@ export interface KanbanHandlerDependencies {
 
 let deps: KanbanHandlerDependencies | null = null;
 
-function ensureDir(): void {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-}
-
+// Persistence delegates to the SQLite-backed kanban-db (single source of truth, WAL).
+// loadTasks/saveTasks keep their signatures, so every IPC handler below and the
+// /api/kanban/* routes migrate to SQLite with no further changes. (Wave 0 #5.)
 function loadTasks(): KanbanTask[] {
-  ensureDir();
-  if (!fs.existsSync(KANBAN_FILE)) {
-    return [];
-  }
-  try {
-    const data = fs.readFileSync(KANBAN_FILE, 'utf-8');
-    return JSON.parse(data);
-  } catch {
-    return [];
-  }
+  return getAllTasks();
 }
 
 function saveTasks(tasks: KanbanTask[]): void {
-  ensureDir();
-  fs.writeFileSync(KANBAN_FILE, JSON.stringify(tasks, null, 2));
+  replaceAllTasks(tasks);
 }
 
 function emitTaskEvent(eventName: string, task: KanbanTask): void {
@@ -149,6 +165,11 @@ export function registerKanbanHandlers(dependencies: KanbanHandlerDependencies):
         order: maxOrder + 1,
         labels: params.labels || [],
         attachments: params.attachments || [],
+        // Forward-looking optional fields: the type + SQLite store already support these,
+        // so persist them at create time instead of silently dropping them (CodeRabbit
+        // Major + Cursor, PR #1). KanbanTaskCreate only exposes due/start dates.
+        dueDate: params.dueDate,
+        startDate: params.startDate,
       };
 
       tasks.push(newTask);
@@ -184,6 +205,13 @@ export function registerKanbanHandlers(dependencies: KanbanHandlerDependencies):
       if (params.progress !== undefined) task.progress = params.progress;
       if (params.assignedAgentId !== undefined) task.assignedAgentId = params.assignedAgentId;
       if (params.completionSummary !== undefined) task.completionSummary = params.completionSummary;
+      // Forward-looking optional fields — KanbanTaskUpdate exposes these and the SQLite store
+      // round-trips them, so the IPC update path must persist them too (CodeRabbit Major +
+      // Cursor "IPC update drops new fields", PR #1).
+      if (params.dueDate !== undefined) task.dueDate = params.dueDate;
+      if (params.startDate !== undefined) task.startDate = params.startDate;
+      if (params.githubPr !== undefined) task.githubPr = params.githubPr;
+      if (params.mentions !== undefined) task.mentions = params.mentions;
 
       task.updatedAt = new Date().toISOString();
 

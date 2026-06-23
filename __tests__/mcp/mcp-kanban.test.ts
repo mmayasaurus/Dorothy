@@ -1,29 +1,21 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 
 // ============================================================================
-// mcp-kanban tool handler tests
+// mcp-kanban operation-semantics tests
 // ============================================================================
-// Tests the business logic of all kanban MCP tool handlers:
-// list_tasks, get_task, create_task, update_task_progress,
-// mark_task_done, move_task, delete_task, assign_task
+// mcp-kanban is now a thin HTTP client to the Dorothy Agent API
+// (electron/services/api-routes/kanban-routes.ts), which is the SINGLE SQLite
+// writer for the board — it no longer reads/writes ~/.dorothy/kanban-tasks.json,
+// so the former loadTasks/saveTasks JSON tests are gone.
+//
+// These tests document the per-operation semantics that contract guarantees and
+// that the kanban routes implement: list_tasks, get_task, create_task,
+// update_task_progress, mark_task_done, move_task, delete_task, assign_task.
 
-// Mock fs module
-vi.mock('fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('fs')>();
-  return {
-    ...actual,
-    existsSync: vi.fn().mockReturnValue(false),
-    readFileSync: vi.fn().mockReturnValue('[]'),
-    writeFileSync: vi.fn(),
-    mkdirSync: vi.fn(),
-  };
-});
-
-import * as fs from 'fs';
-
-// Replicate core kanban logic for testing (same pattern as existing tests)
 type KanbanColumn = 'backlog' | 'planned' | 'ongoing' | 'done';
 
+// Minimal fixture type (not the canonical KanbanTask — that lives in
+// src/types/kanban.ts and is guarded by __tests__/types/kanban-type-drift.test.ts).
 interface KanbanTask {
   id: string;
   title: string;
@@ -40,22 +32,6 @@ interface KanbanTask {
   order: number;
   labels: string[];
   completionSummary?: string;
-}
-
-function loadTasks(): KanbanTask[] {
-  if (!fs.existsSync('/mock/kanban-tasks.json')) {
-    return [];
-  }
-  try {
-    const data = fs.readFileSync('/mock/kanban-tasks.json', 'utf-8');
-    return JSON.parse(data);
-  } catch {
-    return [];
-  }
-}
-
-function saveTasks(tasks: KanbanTask[]): void {
-  fs.writeFileSync('/mock/kanban-tasks.json', JSON.stringify(tasks, null, 2));
 }
 
 function makeTask(overrides: Partial<KanbanTask> = {}): KanbanTask {
@@ -79,33 +55,6 @@ function makeTask(overrides: Partial<KanbanTask> = {}): KanbanTask {
 }
 
 describe('mcp-kanban', () => {
-  beforeEach(() => {
-    vi.mocked(fs.existsSync).mockReturnValue(false);
-    vi.mocked(fs.readFileSync).mockReturnValue('[]');
-    vi.mocked(fs.writeFileSync).mockClear();
-    vi.mocked(fs.mkdirSync).mockClear();
-  });
-
-  describe('loadTasks', () => {
-    it('returns empty array when file does not exist', () => {
-      vi.mocked(fs.existsSync).mockReturnValue(false);
-      expect(loadTasks()).toEqual([]);
-    });
-
-    it('returns parsed tasks from file', () => {
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      const tasks = [makeTask()];
-      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(tasks));
-      expect(loadTasks()).toEqual(tasks);
-    });
-
-    it('returns empty array on parse error', () => {
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      vi.mocked(fs.readFileSync).mockReturnValue('invalid json{');
-      expect(loadTasks()).toEqual([]);
-    });
-  });
-
   describe('list_tasks handler logic', () => {
     function listTasks(tasks: KanbanTask[], column?: KanbanColumn, assignedToMe?: boolean, agentId?: string) {
       let filtered = [...tasks];
@@ -400,17 +349,6 @@ describe('mcp-kanban', () => {
         ? `Task "Test" assigned to agent ${assignedId.slice(0, 8)}`
         : 'Task "Test" unassigned';
       expect(msg).toBe('Task "Test" unassigned');
-    });
-  });
-
-  describe('saveTasks', () => {
-    it('writes tasks as formatted JSON', () => {
-      const tasks = [makeTask()];
-      saveTasks(tasks);
-      expect(fs.writeFileSync).toHaveBeenCalledWith(
-        '/mock/kanban-tasks.json',
-        JSON.stringify(tasks, null, 2)
-      );
     });
   });
 });

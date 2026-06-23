@@ -93,6 +93,7 @@ import { registerVaultHandlers } from './handlers/vault-handlers';
 import { registerWorldHandlers } from './handlers/world-handlers';
 import { registerTemplateHandlers } from './handlers/template-handlers';
 import { initVaultDb, closeVaultDb } from './services/vault-db';
+import { closeKanbanDb } from './services/kanban-db';
 import { initAutoUpdater, checkForUpdates, setMainWindowGetter } from './services/update-checker';
 import { initKanbanAutomation, findMatchingAgent, createAgentForTask, startAgentForTask } from './services/kanban-automation';
 
@@ -624,6 +625,7 @@ app.on('before-quit', () => {
   saveAgents();
   killAllPty();
   closeVaultDb();
+  closeKanbanDb();
 });
 
 // Handle certificate errors in development

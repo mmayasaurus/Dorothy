@@ -1,12 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
 let handlers: Map<string, (...args: unknown[]) => Promise<unknown>>;
-let tmpDir: string;
+
+// In-memory stand-in for the SQLite-backed kanban-db. The handlers persist through
+// getAllTasks/replaceAllTasks; mocking them keeps this a pure logic test — no native
+// better-sqlite3 binary, no file I/O. JSON round-trips mimic the real store handing
+// back fresh task objects on every read.
+const dbStore = vi.hoisted(() => ({ tasks: [] as unknown[] }));
+
+vi.mock('../../../electron/services/kanban-db', () => ({
+  getAllTasks: vi.fn(() => JSON.parse(JSON.stringify(dbStore.tasks))),
+  replaceAllTasks: vi.fn((tasks: unknown[]) => { dbStore.tasks = JSON.parse(JSON.stringify(tasks)); }),
+}));
 
 vi.mock('electron', () => ({
   ipcMain: {
@@ -32,11 +39,6 @@ vi.mock('../../../electron/utils/kanban-generate', () => ({
   })),
 }));
 
-vi.mock('os', async (importOriginal) => {
-  const mod = await importOriginal<typeof import('os')>();
-  return { ...mod, homedir: () => tmpDir };
-});
-
 function invokeHandler(channel: string, ...args: unknown[]): Promise<unknown> {
   const fn = handlers.get(channel);
   if (!fn) throw new Error(`No handler for "${channel}"`);
@@ -50,11 +52,7 @@ let mockDeps: Record<string, unknown>;
 beforeEach(() => {
   vi.resetModules();
   handlers = new Map();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kanban-test-'));
-
-  // Ensure data dir
-  const dataDir = path.join(tmpDir, '.dorothy');
-  fs.mkdirSync(dataDir, { recursive: true });
+  dbStore.tasks = [];
 
   mockDeps = {
     getMainWindow: vi.fn(() => ({ webContents: { send: vi.fn() } })),
@@ -69,15 +67,14 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 function writeKanbanFile(tasks: unknown[]): void {
-  fs.writeFileSync(path.join(tmpDir, '.dorothy', 'kanban-tasks.json'), JSON.stringify(tasks, null, 2));
+  dbStore.tasks = JSON.parse(JSON.stringify(tasks));
 }
 
 function readKanbanFile(): unknown[] {
-  return JSON.parse(fs.readFileSync(path.join(tmpDir, '.dorothy', 'kanban-tasks.json'), 'utf-8'));
+  return JSON.parse(JSON.stringify(dbStore.tasks));
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -159,6 +156,26 @@ describe('kanban-handlers', () => {
       expect(result.task.priority).toBe('high');
       expect(result.task.labels).toEqual(['bug', 'urgent']);
     });
+
+    it('persists forward-looking due/start dates through the store (Wave 0 #4 fields)', async () => {
+      await registerHandlers();
+
+      await invokeHandler('kanban:create', {
+        title: 'Dated Task',
+        description: 'Desc',
+        projectId: 'p',
+        projectPath: '/p',
+        dueDate: '2026-07-01',
+        startDate: '2026-06-25',
+      });
+
+      // Read back through the (mocked) store to prove the handler actually persisted these,
+      // not just echoed them on the returned task (Sourcery / Cursor / CodeRabbit, PR #1).
+      const { tasks } = await invokeHandler('kanban:list') as { tasks: Array<Record<string, unknown>> };
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0].dueDate).toBe('2026-07-01');
+      expect(tasks[0].startDate).toBe('2026-06-25');
+    });
   });
 
   describe('kanban:update', () => {
@@ -182,6 +199,33 @@ describe('kanban-handlers', () => {
       expect(result.task.title).toBe('Updated Title');
       expect(result.task.priority).toBe('high');
       expect(result.task.progress).toBe(50);
+    });
+
+    it('persists forward-looking fields (due/start/githubPr/mentions) through the store', async () => {
+      writeKanbanFile([
+        { id: 'upd-2', title: 'T', description: 'D', column: 'backlog', order: 0,
+          projectId: 'p', projectPath: '/p', priority: 'low', progress: 0, labels: [],
+          requiredSkills: [], assignedAgentId: null, agentCreatedForTask: false,
+          createdAt: '2026-01-01', updatedAt: '2026-01-01', attachments: [] },
+      ]);
+
+      await registerHandlers();
+      await invokeHandler('kanban:update', {
+        id: 'upd-2',
+        dueDate: '2026-08-01',
+        startDate: '2026-07-15',
+        githubPr: { url: 'https://github.com/o/r/pull/7', number: 7 },
+        mentions: ['agent-2'],
+      });
+
+      // Round-trip through the store proves the kanban:update handler persists these (it
+      // used to drop them — Cursor "IPC update drops new fields", PR #1).
+      const { tasks } = await invokeHandler('kanban:list') as { tasks: Array<Record<string, unknown>> };
+      const updated = tasks.find((x) => x.id === 'upd-2')!;
+      expect(updated.dueDate).toBe('2026-08-01');
+      expect(updated.startDate).toBe('2026-07-15');
+      expect(updated.githubPr).toEqual({ url: 'https://github.com/o/r/pull/7', number: 7 });
+      expect(updated.mentions).toEqual(['agent-2']);
     });
 
     it('returns error for non-existent task', async () => {

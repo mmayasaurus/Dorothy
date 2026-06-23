@@ -271,34 +271,34 @@ async function pollGitHub(config: GitHubSourceConfig, automation: Automation): P
 // ============================================================================
 
 const APP_SETTINGS_FILE = path.join(os.homedir(), ".dorothy", "app-settings.json");
-const KANBAN_FILE = path.join(os.homedir(), ".dorothy", "kanban-tasks.json");
 
-// Kanban task creation helper for JIRA items
-function createKanbanTaskFromJiraItem(
+// Kanban task creation helper for JIRA items.
+//
+// Posts to the Agent API (POST /api/kanban/tasks) so the Electron main process —
+// the single SQLite writer — creates the task. Previously this read-modify-wrote
+// the legacy ~/.dorothy/kanban-tasks.json directly, racing the real board store;
+// that dual-writer hazard is now closed. The API route generates the id, order,
+// timestamps and other defaults, so we only send the JIRA-derived fields.
+// Returns true if the task was created (or already exists on the board), false if creation
+// failed (API down / transient) so the caller can retry this item on the next poll instead
+// of marking it processed and silently dropping the JIRA issue (CodeRabbit, PR #1).
+async function createKanbanTaskFromJiraItem(
   item: PollResult["items"][0],
   automation: Automation
-): void {
+): Promise<boolean> {
   try {
-    // Load existing kanban tasks
-    let tasks: Array<Record<string, unknown>> = [];
-    if (fs.existsSync(KANBAN_FILE)) {
-      tasks = JSON.parse(fs.readFileSync(KANBAN_FILE, "utf-8"));
-    }
-
-    // Check if a task with this JIRA key already exists (avoid duplicates)
     const jiraKey = item.raw.key as string;
-    const existingTask = tasks.find(
-      (t) => t.labels && Array.isArray(t.labels) && (t.labels as string[]).includes(`jira:${jiraKey}`)
-    );
-    if (existingTask) {
-      return; // Already exists
-    }
 
-    // Find max order in backlog
-    const backlogTasks = tasks.filter((t) => t.column === "backlog");
-    const maxOrder = backlogTasks.length > 0
-      ? Math.max(...backlogTasks.map((t) => (t.order as number) || 0))
-      : -1;
+    // Skip if a task with this JIRA key already exists (avoid duplicates on re-poll).
+    const existing = (await apiRequest("/api/kanban/tasks")) as {
+      tasks?: Array<{ labels?: unknown }>;
+    };
+    const alreadyExists = (existing.tasks || []).some(
+      (t) => Array.isArray(t.labels) && (t.labels as string[]).includes(`jira:${jiraKey}`)
+    );
+    if (alreadyExists) {
+      return true; // Already on the board — nothing to do, treat as success.
+    }
 
     // Map JIRA priority to kanban priority
     const jiraPriority = (item.raw.priority as string || "").toLowerCase();
@@ -317,35 +317,20 @@ function createKanbanTaskFromJiraItem(
       projectPath = path.join(os.homedir(), projectPath.replace(/^\//, ""));
     }
 
-    const newTask = {
-      id: generateId() + generateId(), // Longer ID to match uuid-like format
+    await apiRequest("/api/kanban/tasks", "POST", {
       title: `[${jiraKey}] ${item.title}`,
       description: `**JIRA Issue:** ${item.url}\n**Project Key:** ${jiraKey.split("-")[0]}\n**Type:** ${item.type}\n**Status:** ${item.raw.status}\n**Priority:** ${item.raw.priority || "Unset"}\n**Reporter:** ${item.author}\n**Assignee:** ${item.raw.assignee || "Unassigned"}\n\n${item.body || "No description"}`,
-      column: "backlog",
-      projectId: jiraKey,
-      projectPath,
-      assignedAgentId: null,
-      agentCreatedForTask: false,
-      requiredSkills: [],
+      project_path: projectPath,
+      // project_id is intentionally omitted: the route derives it from project_path's
+      // basename, so an automation's JIRA tasks group under one project instead of each
+      // issue key (e.g. PROJ-123) becoming its own project (PR #1, CodeRabbit).
       priority,
-      progress: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      order: maxOrder + 1,
       labels: [`jira:${jiraKey}`, "jira", item.type],
-      attachments: [],
-    };
-
-    tasks.push(newTask);
-
-    // Ensure directory exists
-    const dir = path.dirname(KANBAN_FILE);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.writeFileSync(KANBAN_FILE, JSON.stringify(tasks, null, 2));
+    });
+    return true;
   } catch (error) {
     console.error("Failed to create kanban task from JIRA item:", error);
+    return false; // Signal failure so the caller retries this item on the next poll.
   }
 }
 
@@ -693,8 +678,18 @@ async function runAutomation(automation: Automation): Promise<AutomationRun> {
         variables.reporter = item.raw.reporter;
         variables.domain = item.raw.domain;
 
-        // Create kanban task from JIRA issue
-        createKanbanTaskFromJiraItem(item, automation);
+        // Create the kanban task BEFORE the agent runs (below). If it fails (API down /
+        // transient), skip this item this cycle so it retries on the next poll — do NOT run
+        // the agent or mark the item processed, which would silently drop the JIRA issue.
+        // This is safe from duplicate agent runs precisely because it is before the agent
+        // spawn (CodeRabbit, PR #1).
+        const taskCreated = await createKanbanTaskFromJiraItem(item, automation);
+        if (!taskCreated) {
+          console.warn(
+            `[automation] Skipping JIRA item ${item.raw.key} this cycle — kanban task creation failed; will retry next poll.`
+          );
+          continue;
+        }
       }
 
       let agentOutput = "";
