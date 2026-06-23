@@ -162,6 +162,14 @@ const INSERT_SQL = `
     @comments, @github_pr, @mentions
   )`;
 
+/**
+ * Same columns as INSERT_SQL but OR IGNORE, derived once at module load. Used only by the
+ * one-time legacy import so a constraint-violating row (e.g. a duplicate id) is skipped
+ * rather than aborting the whole import transaction. Derived from INSERT_SQL to keep a
+ * single source of truth for the column list (no second list to drift).
+ */
+const IMPORT_INSERT_SQL = INSERT_SQL.replace('INSERT INTO', 'INSERT OR IGNORE INTO');
+
 /** Read the whole board. */
 export function getAllTasks(): KanbanTask[] {
   const rows = getKanbanDb()
@@ -228,11 +236,11 @@ function importLegacyJsonOnce(d: Database.Database): void {
     // Insert the rows AND set the json_imported flag in ONE atomic transaction, so the board
     // data and the "already imported" marker commit together — there is no window where the
     // rows committed but the flag (a separate statement) did not, which would re-import and
-    // duplicate them next launch (Cursor Bugbot, PR #1). INSERT OR IGNORE skips any row that
-    // still violates a constraint (e.g. a duplicate id) instead of throwing and rolling the
-    // whole import back, so one bad row can't block the legacy import forever and leave the
-    // board permanently empty (CodeRabbit, PR #1).
-    const insert = d.prepare(INSERT_SQL.replace('INSERT INTO', 'INSERT OR IGNORE INTO'));
+    // duplicate them next launch (Cursor Bugbot, PR #1). IMPORT_INSERT_SQL is OR IGNORE, so
+    // a row that still violates a constraint (e.g. a duplicate id) is skipped instead of
+    // throwing and rolling the whole import back — one bad row can't block the legacy import
+    // forever and leave the board permanently empty (CodeRabbit, PR #1).
+    const insert = d.prepare(IMPORT_INSERT_SQL);
     const importTxn = d.transaction((importRows: typeof rows) => {
       for (const r of importRows) insert.run(r);
       markImportedStmt.run();
