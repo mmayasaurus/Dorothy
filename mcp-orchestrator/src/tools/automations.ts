@@ -279,10 +279,13 @@ const APP_SETTINGS_FILE = path.join(os.homedir(), ".dorothy", "app-settings.json
 // the legacy ~/.dorothy/kanban-tasks.json directly, racing the real board store;
 // that dual-writer hazard is now closed. The API route generates the id, order,
 // timestamps and other defaults, so we only send the JIRA-derived fields.
+// Returns true if the task was created (or already exists on the board), false if creation
+// failed (API down / transient) so the caller can retry this item on the next poll instead
+// of marking it processed and silently dropping the JIRA issue (CodeRabbit, PR #1).
 async function createKanbanTaskFromJiraItem(
   item: PollResult["items"][0],
   automation: Automation
-): Promise<void> {
+): Promise<boolean> {
   try {
     const jiraKey = item.raw.key as string;
 
@@ -294,7 +297,7 @@ async function createKanbanTaskFromJiraItem(
       (t) => Array.isArray(t.labels) && (t.labels as string[]).includes(`jira:${jiraKey}`)
     );
     if (alreadyExists) {
-      return; // Already exists
+      return true; // Already on the board — nothing to do, treat as success.
     }
 
     // Map JIRA priority to kanban priority
@@ -324,8 +327,10 @@ async function createKanbanTaskFromJiraItem(
       priority,
       labels: [`jira:${jiraKey}`, "jira", item.type],
     });
+    return true;
   } catch (error) {
     console.error("Failed to create kanban task from JIRA item:", error);
+    return false; // Signal failure so the caller retries this item on the next poll.
   }
 }
 
@@ -673,8 +678,18 @@ async function runAutomation(automation: Automation): Promise<AutomationRun> {
         variables.reporter = item.raw.reporter;
         variables.domain = item.raw.domain;
 
-        // Create kanban task from JIRA issue
-        await createKanbanTaskFromJiraItem(item, automation);
+        // Create the kanban task BEFORE the agent runs (below). If it fails (API down /
+        // transient), skip this item this cycle so it retries on the next poll — do NOT run
+        // the agent or mark the item processed, which would silently drop the JIRA issue.
+        // This is safe from duplicate agent runs precisely because it is before the agent
+        // spawn (CodeRabbit, PR #1).
+        const taskCreated = await createKanbanTaskFromJiraItem(item, automation);
+        if (!taskCreated) {
+          console.warn(
+            `[automation] Skipping JIRA item ${item.raw.key} this cycle — kanban task creation failed; will retry next poll.`
+          );
+          continue;
+        }
       }
 
       let agentOutput = "";
