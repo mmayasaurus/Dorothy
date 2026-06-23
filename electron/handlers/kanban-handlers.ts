@@ -165,6 +165,11 @@ export function registerKanbanHandlers(dependencies: KanbanHandlerDependencies):
         order: maxOrder + 1,
         labels: params.labels || [],
         attachments: params.attachments || [],
+        // Forward-looking optional fields: the type + SQLite store already support these,
+        // so persist them at create time instead of silently dropping them (CodeRabbit
+        // Major + Cursor, PR #1). KanbanTaskCreate only exposes due/start dates.
+        dueDate: params.dueDate,
+        startDate: params.startDate,
       };
 
       tasks.push(newTask);
@@ -200,6 +205,13 @@ export function registerKanbanHandlers(dependencies: KanbanHandlerDependencies):
       if (params.progress !== undefined) task.progress = params.progress;
       if (params.assignedAgentId !== undefined) task.assignedAgentId = params.assignedAgentId;
       if (params.completionSummary !== undefined) task.completionSummary = params.completionSummary;
+      // Forward-looking optional fields — KanbanTaskUpdate exposes these and the SQLite store
+      // round-trips them, so the IPC update path must persist them too (CodeRabbit Major +
+      // Cursor "IPC update drops new fields", PR #1).
+      if (params.dueDate !== undefined) task.dueDate = params.dueDate;
+      if (params.startDate !== undefined) task.startDate = params.startDate;
+      if (params.githubPr !== undefined) task.githubPr = params.githubPr;
+      if (params.mentions !== undefined) task.mentions = params.mentions;
 
       task.updatedAt = new Date().toISOString();
 

@@ -92,6 +92,22 @@ export function getKanbanDb(): Database.Database {
   return db;
 }
 
+/**
+ * Parse a JSON text column, falling back (and logging) if it's malformed — so one corrupt
+ * row can't throw out of rowToTask and take the WHOLE board load (getAllTasks) down with it
+ * (Cursor "Corrupt JSON breaks board load", PR #1). Generic over the field's type, taken via
+ * indexed access off KanbanTask so no extra sub-type imports are needed.
+ */
+function parseJsonColumn<T>(raw: string | null | undefined, fallback: T, column: string, id: string): T {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch (err) {
+    console.error(`[kanban-db] Malformed JSON in '${column}' for task ${id}; using fallback:`, err);
+    return fallback;
+  }
+}
+
 function rowToTask(r: KanbanRow): KanbanTask {
   const task: KanbanTask = {
     id: r.id,
@@ -102,22 +118,22 @@ function rowToTask(r: KanbanRow): KanbanTask {
     projectPath: r.project_path,
     assignedAgentId: r.assigned_agent_id ?? null,
     agentCreatedForTask: !!r.agent_created_for_task,
-    requiredSkills: JSON.parse(r.required_skills || '[]'),
+    requiredSkills: parseJsonColumn<KanbanTask['requiredSkills']>(r.required_skills, [], 'required_skills', r.id),
     priority: r.priority as KanbanTask['priority'],
     progress: r.progress,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     order: r.task_order,
-    labels: JSON.parse(r.labels || '[]'),
-    attachments: JSON.parse(r.attachments || '[]'),
+    labels: parseJsonColumn<KanbanTask['labels']>(r.labels, [], 'labels', r.id),
+    attachments: parseJsonColumn<KanbanTask['attachments']>(r.attachments, [], 'attachments', r.id),
   };
   if (r.completed_at) task.completedAt = r.completed_at;
   if (r.completion_summary) task.completionSummary = r.completion_summary;
   if (r.due_date) task.dueDate = r.due_date;
   if (r.start_date) task.startDate = r.start_date;
-  if (r.comments) task.comments = JSON.parse(r.comments);
-  if (r.github_pr) task.githubPr = JSON.parse(r.github_pr);
-  if (r.mentions) task.mentions = JSON.parse(r.mentions);
+  if (r.comments) task.comments = parseJsonColumn<KanbanTask['comments']>(r.comments, [], 'comments', r.id);
+  if (r.github_pr) task.githubPr = parseJsonColumn<KanbanTask['githubPr']>(r.github_pr, null, 'github_pr', r.id);
+  if (r.mentions) task.mentions = parseJsonColumn<KanbanTask['mentions']>(r.mentions, [], 'mentions', r.id);
   return task;
 }
 
